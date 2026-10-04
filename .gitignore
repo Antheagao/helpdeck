@@ -1,0 +1,15 @@
+# Secrets: never commit environment files, anywhere in the tree.
+.env
+.env.*
+*.env
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# OS / editors
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>helpdeck demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --page: #f9f9f7;
+        --surface: #fcfcfb;
+        --ink: #0b0b0b;
+        --ink-2: #52514e;
+        --muted: #898781;
+        --border: rgba(11, 11, 11, 0.1);
+        --accent: #2a78d6;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --page: #0d0d0d;
+          --surface: #1a1a19;
+          --ink: #ffffff;
+          --ink-2: #c3c2b7;
+          --border: rgba(255, 255, 255, 0.1);
+          --accent: #3987e5;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--ink);
+        font: 15px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      main { max-width: 680px; margin: 0 auto; padding: 64px 24px 160px; }
+      h1 { font-size: 28px; margin: 0 0 8px; }
+      .sub { color: var(--ink-2); margin: 0 0 32px; }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px 20px;
+        margin-bottom: 16px;
+      }
+      .card h2 { font-size: 15px; margin: 0 0 8px; }
+      .card p { margin: 0; color: var(--ink-2); font-size: 14px; }
+      code {
+        background: var(--page);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 1px 5px;
+        font-size: 13px;
+      }
+      ul { color: var(--ink-2); font-size: 14px; padding-left: 20px; }
+      .hint { color: var(--muted); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>helpdeck</h1>
+      <p class="sub">
+        An embeddable AI support chatbot you host yourself. This page embeds the widget with one
+        script tag - look in the bottom right.
+      </p>
+
+      <div class="card">
+        <h2>Try asking</h2>
+        <ul>
+          <li>How do I install and embed the widget?</li>
+          <li>How does the token budget work?</li>
+          <li>Why BM25 instead of embeddings?</li>
+          <li>What happens if the tracing collector is down?</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Embedding it</h2>
+        <p>
+          <code>&lt;script src="widget.js" defer data-endpoint="/api/chat"&gt;&lt;/script&gt;</code>
+        </p>
+      </div>
+
+      <p class="hint">
+        With no API key configured the server answers with its offline mock model, so this demo
+        runs with zero credentials.
+      </p>
+    </main>
+    <script src="/widget.js" defer data-endpoint="/api/chat"></script>
+  </body>
+</html>
