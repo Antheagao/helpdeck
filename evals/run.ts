@@ -2,6 +2,7 @@
  * `npm run eval` writes evals/results/latest.json from a fresh run.
  * `npm run eval:check` runs fresh and exits 1 on a hard invariant, a metric
  * below its threshold, or an artifact that differs from the committed one.
+ * `npm run eval -- --update-readme` also regenerates the README's eval table.
  */
 
 import fs from 'node:fs'
@@ -10,9 +11,11 @@ import { fileURLToPath } from 'node:url'
 
 import { checkGate, misses, renderTable, serialize } from './gate.js'
 import { runEvals } from './harness.js'
+import { replaceEvalTable } from './readme.js'
 
 const dir = path.dirname(fileURLToPath(import.meta.url))
 const artifactPath = path.join(dir, 'results', 'latest.json')
+const readmePath = path.join(dir, '..', 'README.md')
 
 const artifact = await runEvals()
 const fresh = serialize(artifact)
@@ -31,4 +34,8 @@ if (process.argv.includes('--check')) {
   fs.mkdirSync(path.dirname(artifactPath), { recursive: true })
   fs.writeFileSync(artifactPath, fresh)
   console.log(`wrote ${path.relative(process.cwd(), artifactPath)}`)
+  if (process.argv.includes('--update-readme')) {
+    fs.writeFileSync(readmePath, replaceEvalTable(fs.readFileSync(readmePath, 'utf8'), artifact))
+    console.log(`updated the eval table in ${path.relative(process.cwd(), readmePath)}`)
+  }
 }
