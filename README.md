@@ -47,6 +47,8 @@ HELPDECK_MODEL=claude-haiku-4-5
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | unset | Provider; unset means the offline mock |
 | `HELPDECK_MODEL` | per provider | Override the model id |
 | `HELPDECK_DOCS` | `./docs` | Knowledge-base directory |
+| `HELPDECK_TOOLS` | all tools | Tools offered to the model: a comma-separated list of `lookup_order`, `create_ticket`, `handoff_to_human`, or `none`. Only which tools are offered is configurable: whether one needs the customer's confirmation is fixed in code |
+| `HELPDECK_OPERATOR_TOKEN` | unset | Bearer token (at least 32 characters, e.g. `openssl rand -hex 32`) for `GET /api/operator/handoffs` (the newest 50, newest first; no paging yet) and `GET /api/operator/handoffs/:reference`. Unset turns the operator API off |
 | `SPANLIGHT_URL` | unset | Export traces to a spanlight collector |
 
 ## How a request flows

@@ -1,12 +1,16 @@
 /**
  * The wire contract between the server and the widget: SSE events, action
- * cards, and error bodies. Types only, with no imports, so the widget can
- * `import type` from here without pulling in any server code.
+ * cards, and error bodies. Types and one shared limit, with no imports, so the
+ * widget can import from here without pulling in any server code.
  *
  * Wire fields are camelCase, matching the shipped embed contract
  * (`sessionId`, `inputTokens`). New events are additive: a widget that does
  * not know an event name ignores it.
  */
+
+/** Longest chat message (and handoff follow-up), in characters. The server
+ *  enforces it; a client's maxLength is only a hint. */
+export const MAX_MESSAGE_CHARS = 4000
 
 export type ToolName = 'lookup_order' | 'create_ticket' | 'handoff_to_human'
 
@@ -72,6 +76,8 @@ export type ApiErrorCode =
   | 'action_failed'
   | 'rate_limited'
   | 'unauthorized'
+  | 'handoff_not_found'
+  | 'handoff_queue_full'
   | 'invalid_body'
   | 'payload_too_large'
   | 'not_found'
@@ -81,4 +87,29 @@ export type ApiErrorCode =
  *  branch on `code`; `message` is for people. */
 export interface ApiErrorBody {
   error: { code: ApiErrorCode; message: string }
+}
+
+/** One handoff as the operator API shows it. It never includes the chat
+ *  session id: that id authorizes actions for the customer, so it stays
+ *  between the customer's browser and the server. */
+export interface HandoffView {
+  reference: string
+  /** ISO 8601. */
+  createdAt: string
+  reason: string
+  /** The exact summary the customer saw and approved on the card. */
+  summary: string
+  transcript: { role: 'user' | 'assistant'; content: string }[]
+  actions: { tickets: string[]; orders: string[] }
+  followUps: { at: string; text: string }[]
+  /** True when later customer messages were turned away for lack of room. */
+  followUpsFull: boolean
+  status: 'waiting'
+}
+
+/** Body of GET /api/operator/handoffs: the newest 50, newest first. There is
+ *  no paging yet, so `nextCursor` is always null. */
+export interface OperatorListResponse {
+  handoffs: HandoffView[]
+  nextCursor: null
 }

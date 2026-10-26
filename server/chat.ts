@@ -7,9 +7,17 @@
  * ProposalPort, which has no way to confirm; see actions.ts.
  */
 
-import type { ProposalPort } from './actions.js'
+import type { Proposal, ProposalPort } from './actions.js'
 import { previewAction } from './actions.js'
 import type { OrderBackend } from './backend.js'
+import { neutralizeClosingTag } from './fence.js'
+import {
+  handoffProseSummarizer,
+  summarizeForHandoff,
+  type HandoffDraft,
+  type HandoffGate,
+  type ProseSummarizer,
+} from './handoff.js'
 import type { ChatMessage, LLM } from './llm.js'
 import { ConversationMemory, SessionStore, extractiveSummarizer, type Summarizer } from './memory.js'
 import { MockLLM } from './mock-llm.js'
@@ -37,6 +45,10 @@ export interface ChatDeps {
   enabledTools: readonly ToolName[]
   /** Proposal only: confirming belongs to the confirm route. */
   actions: ProposalPort
+  /** Follow-ups for a handed-off session; it cannot create a handoff. */
+  handoffs: HandoffGate
+  /** Writes the recap in a handoff summary; null for the offline mock. */
+  handoffSummarizer: ProseSummarizer | null
   productName?: string
 }
 
@@ -81,6 +93,11 @@ export function makeSummarizer(llm: LLM): Summarizer {
   return llm instanceof MockLLM ? extractiveSummarizer : llmSummarizer(llm)
 }
 
+/** The mock has no prose to offer a handoff; a real model writes the recap. */
+export function makeHandoffSummarizer(llm: LLM): ProseSummarizer | null {
+  return llm instanceof MockLLM ? null : handoffProseSummarizer(llm)
+}
+
 export function makeSessionStore(llm: LLM): SessionStore {
   const summarize = makeSummarizer(llm)
   return new SessionStore(
@@ -88,18 +105,9 @@ export function makeSessionStore(llm: LLM): SessionStore {
   )
 }
 
-/**
- * Passage text is third-party data inside a tagged block; a closing tag in it
- * must not be able to end the block early. Zero-width characters are removed
- * first so they cannot split the tag name, and the match takes any spacing,
- * case, attributes, `/>`, or a backslash-escaped slash. Look-alike glyphs
- * (a fullwidth bracket, say) cannot be caught by a regex and are not tried:
- * the real defense is the server gate, which no prompt text can open.
- */
+/** Passage text is third-party data inside a tagged block; see fence.ts. */
 function neutralizeTags(text: string): string {
-  return text
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/<\\?\/\s*documentation\b[^>]*>/gi, '[/documentation]')
+  return neutralizeClosingTag(text, 'documentation')
 }
 
 const SYSTEM_RULES =
@@ -147,11 +155,14 @@ function toolLabel(call: ReadCall): string {
  *  how the customer proves the order is theirs. */
 function toolAttributes(call: ReadCall, result: unknown): Record<string, unknown> {
   switch (call.tool) {
-    case 'lookup_order': {
-      const found = typeof result === 'object' && result !== null && 'found' in result && result.found === true
-      return { tool: call.tool, order_id: call.args.order_id, found }
-    }
+    case 'lookup_order':
+      return { tool: call.tool, order_id: call.args.order_id, found: wasFound(result) }
   }
+}
+
+/** Whether a lookup tool result says it found what was asked for. */
+function wasFound(result: unknown): boolean {
+  return typeof result === 'object' && result !== null && 'found' in result && result.found === true
 }
 
 type ResolvedCall = { ok: true; call: ParsedCall } | { ok: false; error: string }
@@ -175,6 +186,23 @@ export async function answer(
   question: string,
   emit: (event: ChatEvent) => void = () => {},
 ): Promise<ChatResult> {
+  // A handed-off session belongs to a person now: no retrieval, no model, no
+  // memory. The message goes to the support team's record instead.
+  const handedOff = deps.handoffs.recordFollowUp(sessionId, question)
+  if (handedOff) {
+    // Traced, but with no message text: only the fact that it was filed.
+    const trace = deps.tracer.start('chat-request', { product: deps.productName ?? 'helpdeck', handedOff: true }, sessionId)
+    await trace.span('handoff-follow-up', 'other', async () => handedOff, (record) => {
+      record.attributes = { handedOff: true, followUpRecorded: handedOff.recorded }
+    })
+    void deps.tracer.send(trace)
+    emit({
+      event: 'handoff',
+      data: { reference: handedOff.reference, status: 'waiting', followUpRecorded: handedOff.recorded },
+    })
+    return { text: '', sources: [], model: deps.llm.model, inputTokens: 0, outputTokens: 0 }
+  }
+
   const product = deps.productName ?? 'helpdeck'
   const memory = deps.sessions.get(sessionId)
   const trace = deps.tracer.start('chat-request', { product }, sessionId)
@@ -250,7 +278,11 @@ export async function answer(
         if (extra.length > 0) {
           console.warn(`chat: dropped ${extra.length} extra write call(s); one proposal per turn`)
         }
-        const action = deps.actions.propose(sessionId, proposal, previewAction(proposal))
+        const proposed: Proposal =
+          proposal.tool === 'handoff_to_human'
+            ? { ...proposal, draft: await handoffDraft(deps, trace, sessionId, proposal.args.reason, memory, question) }
+            : proposal
+        const action = deps.actions.propose(sessionId, proposed, previewAction(proposed))
         emit({ event: 'action', data: { action } })
         break
       }
@@ -266,7 +298,7 @@ export async function answer(
         // arguments) is answered with the error instead.
         const result =
           resolution.ok && isReadCall(resolution.call)
-            ? await runTool(deps, trace, resolution.call, emit)
+            ? await runTool(deps, trace, sessionId, resolution.call, emit)
             : { error: resolution.ok ? 'That tool is not available.' : resolution.error }
         messages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: JSON.stringify(result) })
       }
@@ -287,6 +319,7 @@ export async function answer(
 async function runTool(
   deps: ChatDeps,
   trace: TraceHandle,
+  sessionId: string,
   call: ReadCall,
   emit: (event: ChatEvent) => void,
 ): Promise<unknown> {
@@ -295,6 +328,39 @@ async function runTool(
   }, (record, value) => {
     record.attributes = toolAttributes(call, value)
   })
+  // A handoff lists the orders the bot actually found for this customer.
+  if (wasFound(result)) deps.handoffs.noteLookup(sessionId, call.args.order_id)
   emit({ event: 'tool', data: { name: call.tool, label: toolLabel(call) } })
   return result
+}
+
+/** The summary and transcript a handoff card shows. Computed here once, then
+ *  stored with the pending action: confirm shares exactly this and does not
+ *  recompute it. The transcript includes the message that asked for the
+ *  handoff, which memory has not recorded yet. */
+async function handoffDraft(
+  deps: ChatDeps,
+  trace: TraceHandle,
+  sessionId: string,
+  reason: string,
+  memory: ConversationMemory,
+  question: string,
+): Promise<HandoffDraft> {
+  const { summary, turns } = memory.render()
+  const transcript = [...turns, { role: 'user' as const, content: question }]
+  const actions = {
+    tickets: deps.actions.listForSession(sessionId).flatMap((a) => (a.result?.tool === 'create_ticket' ? [a.result.ticketId] : [])),
+    orders: deps.handoffs.lookupsFor(sessionId),
+  }
+  const { text, usage } = await trace.span(
+    'handoff-summary',
+    deps.handoffSummarizer ? 'llm' : 'other',
+    () => summarizeForHandoff({ reason, transcript, earlierSummary: summary, actions }, deps.handoffSummarizer),
+    (record, result) => {
+      if (result.usage) {
+        trace.recordLlmUsage(record, result.usage.model, result.usage.inputTokens, result.usage.outputTokens)
+      }
+    },
+  )
+  return { summary: text, transcript, actions }
 }

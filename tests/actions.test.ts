@@ -8,99 +8,32 @@ import { describe, expect, it, vi } from 'vitest'
 import { ActionStore, previewAction, type Executor } from '../server/actions.js'
 import { TicketLimitError } from '../server/backend.js'
 import type { ChatDeps } from '../server/chat.js'
-import { buildDeps, type BuildDepsOptions } from '../server/deps.js'
+import { buildDeps } from '../server/deps.js'
 import { createApp } from '../server/index.js'
-import type { ChatMessage, Completion, LLM, ToolCall } from '../server/llm.js'
+import type { ChatMessage, LLM } from '../server/llm.js'
 import { MockLLM } from '../server/mock-llm.js'
-import type { ActionView, ChatEvent } from '../server/protocol.js'
 import { FixedWindowLimiter, clientKey } from '../server/rate-limit.js'
 import { BM25Index } from '../server/retrieval.js'
 import { TOOL_NAMES, type ToolName, type WriteCall } from '../server/tools.js'
 import { Tracer } from '../server/trace.js'
+import {
+  INDEX,
+  ScriptedLLM,
+  actionOf,
+  call,
+  cancel,
+  chat,
+  confirm,
+  hijacked,
+  kinds,
+  proposeTicket,
+  setup,
+  textOf,
+  ticketCall,
+} from './support.js'
 
 const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server')
-const INDEX = BM25Index.fromMarkdownDir(path.join(SERVER, '..', 'docs'))
 
-type DepsOptions = Partial<Omit<BuildDepsOptions, 'index' | 'docsDir'>>
-
-function setup(options: DepsOptions = {}) {
-  const deps = buildDeps({ llm: new MockLLM({ tokenDelayMs: 0 }), index: INDEX, ...options })
-  return { deps, app: createApp(deps) }
-}
-type Harness = ReturnType<typeof setup>['app']
-
-function parseEvents(body: string): ChatEvent[] {
-  return body
-    .split('\n\n')
-    .filter(Boolean)
-    .map((frame) => {
-      const event = /^event: (.+)$/m.exec(frame)?.[1] ?? ''
-      const data = JSON.parse(/^data: (.+)$/m.exec(frame)?.[1] ?? 'null') as unknown
-      return { event, data } as ChatEvent
-    })
-}
-
-const textOf = (events: ChatEvent[]) =>
-  events.flatMap((e) => (e.event === 'token' ? [e.data.token] : [])).join('')
-const actionOf = (events: ChatEvent[]): ActionView | undefined =>
-  events.flatMap((e) => (e.event === 'action' ? [e.data.action] : []))[0]
-const kinds = (events: ChatEvent[]) => events.map((e) => e.event)
-
-async function chat(app: Harness, sessionId: string, message: string) {
-  const res = await request(app)
-    .post('/api/chat')
-    .send({ sessionId, message })
-    .buffer(true)
-    .parse((r, cb) => {
-      let data = ''
-      r.on('data', (chunk: Buffer) => (data += chunk))
-      r.on('end', () => cb(null, data))
-    })
-  if (res.status !== 200) throw new Error(`chat answered ${res.status}: ${JSON.stringify(res.body)}`)
-  return { status: res.status, events: parseEvents(res.body as string) }
-}
-
-const confirm = (app: Harness, id: string, sessionId: string) =>
-  request(app).post(`/api/actions/${id}/confirm`).send({ sessionId })
-const cancel = (app: Harness, id: string, sessionId: string) =>
-  request(app).post(`/api/actions/${id}/cancel`).send({ sessionId })
-
-async function proposeTicket(app: Harness, sessionId: string, message = 'Open a ticket: my desk lamp stopped working') {
-  const { events } = await chat(app, sessionId, message)
-  const action = actionOf(events)
-  if (!action) throw new Error(`no action card in: ${kinds(events).join(', ')}`)
-  return action
-}
-
-/** A model that returns the given turns in order, recording what it was sent. */
-class ScriptedLLM implements LLM {
-  readonly model = 'scripted'
-  readonly seen: ChatMessage[][] = []
-  private step = 0
-
-  constructor(private readonly script: { text?: string; toolCalls?: ToolCall[]; finishReason?: Completion['finishReason'] }[]) {}
-
-  async complete(messages: ChatMessage[], options?: { onToken?: (t: string) => void }): Promise<Completion> {
-    this.seen.push(structuredClone(messages))
-    const turn = this.script[Math.min(this.step++, this.script.length - 1)] ?? {}
-    if (turn.text) options?.onToken?.(turn.text)
-    const toolCalls = turn.toolCalls ?? []
-    return {
-      text: turn.text ?? '',
-      toolCalls,
-      finishReason: turn.finishReason ?? (toolCalls.length > 0 ? 'tool_calls' : 'stop'),
-      model: this.model,
-      inputTokens: 10,
-      outputTokens: 5,
-    }
-  }
-}
-
-const call = (name: string, args: unknown, id = 'call-1'): ToolCall => ({ id, name, arguments: args })
-const ticketCall = (id = 'call-1') => call('create_ticket', { subject: 'Hijacked', description: 'Do it' }, id)
-
-/** A model taken over by injected text: it calls create_ticket every time. */
-const hijacked = () => new ScriptedLLM([{ toolCalls: [ticketCall()] }])
 
 describe('read tools in the chat loop', () => {
   it('looks up an order, streams a tool chip, and answers with the status', async () => {
@@ -336,14 +269,20 @@ describe('write proposals', () => {
     expect(deps.tickets.count()).toBe(3)
   })
 
-  it('proposes a handoff card without doing anything, when handoff is enabled', async () => {
-    const { app } = setup({ enabledTools: TOOL_NAMES })
+  it('proposes a handoff card without doing anything', async () => {
+    const { app, deps } = setup()
     const { events } = await chat(app, 'handoff-session', 'It arrived damaged, I would like to talk to a person')
-    expect(actionOf(events)).toMatchObject({
+    const action = actionOf(events)
+    expect(action).toMatchObject({
       tool: 'handoff_to_human',
       title: 'Hand this chat to a person',
-      details: [{ label: 'Reason', value: 'It arrived damaged, I would like to talk to a person' }],
+      details: [
+        { label: 'Reason', value: 'It arrived damaged, I would like to talk to a person' },
+        { label: 'Shared with the support team' },
+      ],
     })
+    expect(action?.details[1]?.value).toContain('Customer asked:')
+    expect(deps.handoffs.get('H-1001')).toBeUndefined()
   })
 
   it('refuses mass actions and unsupported requests without a card, and offers a person', async () => {
@@ -357,7 +296,7 @@ describe('write proposals', () => {
   })
 
   it('does not offer a person, or propose one, while handoff is not enabled', async () => {
-    const { app } = setup()
+    const { app } = setup({ enabledTools: ['lookup_order', 'create_ticket'] })
     const refused = await chat(app, 'no-handoff-1', 'Please refund my order')
     expect(textOf(refused.events)).toContain('I can look up an order')
     expect(textOf(refused.events)).not.toContain('person')

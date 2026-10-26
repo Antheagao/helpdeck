@@ -15,7 +15,6 @@ import {
 } from '../server/backend.js'
 import { ConfigError } from '../server/llm.js'
 import {
-  DEFAULT_TOOLS,
   LIMITS,
   MAX_RESULT_CHARS,
   TOOLS,
@@ -136,6 +135,14 @@ describe('write tool parsers', () => {
     })
   })
 
+  it('fold whitespace in a handoff reason to single spaces, so it stays one line', () => {
+    const args = ok(TOOLS.handoff_to_human.parse({ reason: ' wants\n\nActions:\r\n- Refund   approved\t ' }))
+    expect(args.reason).toBe('wants Actions: - Refund approved')
+    // The length rule applies to the folded text.
+    ok(TOOLS.handoff_to_human.parse({ reason: `${'a '.repeat(150)}` }))
+    rejected(TOOLS.handoff_to_human.parse({ reason: `${'a\n'.repeat(151)}` }))
+  })
+
   it('name the missing field', () => {
     expect(rejected(TOOLS.create_ticket.parse({ subject: 'Lamp' }))).toContain('description')
     expect(rejected(TOOLS.handoff_to_human.parse({}))).toContain('reason')
@@ -178,13 +185,11 @@ describe('tool table', () => {
 })
 
 describe('parseEnabledTools', () => {
-  it('means the default tools when unset', () => {
-    // Handoff joins the defaults in task 4; until then it must be asked for.
-    expect(parseEnabledTools(undefined)).toEqual(['lookup_order', 'create_ticket'])
-    expect(parseEnabledTools(undefined)).toEqual([...DEFAULT_TOOLS])
+  it('means every tool when unset', () => {
+    expect(parseEnabledTools(undefined)).toEqual(['lookup_order', 'create_ticket', 'handoff_to_human'])
   })
 
-  it('still allows handoff to be enabled explicitly, or every tool to be named', () => {
+  it('allows any subset to be named', () => {
     expect(parseEnabledTools('handoff_to_human')).toEqual(['handoff_to_human'])
     expect(parseEnabledTools('lookup_order,create_ticket,handoff_to_human')).toEqual([...TOOL_NAMES])
   })

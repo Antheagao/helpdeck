@@ -13,8 +13,15 @@
 
 import { randomBytes } from 'node:crypto'
 
+import type { HandoffDraft } from './handoff.js'
 import type { ActionResult, ActionStatus, ActionView, WriteToolName } from './protocol.js'
 import type { WriteCall } from './tools.js'
+
+/** A validated write, ready to be shown and, once confirmed, run. A handoff
+ *  carries the draft the customer is shown, so confirm shares exactly that. */
+export type Proposal =
+  | Extract<WriteCall, { tool: 'create_ticket' }>
+  | (Extract<WriteCall, { tool: 'handoff_to_human' }> & { draft: HandoffDraft })
 
 /** What the card shows, rendered by the server from validated arguments. */
 export interface ActionPreview {
@@ -33,7 +40,7 @@ export interface ActionOutcome {
 /** What an executor receives: everything it needs and nothing it could widen. */
 export interface ExecutableAction {
   sessionId: string
-  proposal: WriteCall
+  proposal: Proposal
 }
 
 export type Executor = (action: ExecutableAction) => Promise<ActionOutcome>
@@ -65,9 +72,11 @@ export interface ActionSummary {
   result: ActionResult | null
 }
 
-/** All the chat loop may do with actions: propose one. */
+/** All the chat loop may do with actions: propose one, and read what the
+ *  session has done. */
 export interface ProposalPort {
-  propose(sessionId: string, proposal: WriteCall, preview: ActionPreview): ActionView
+  propose(sessionId: string, proposal: Proposal, preview: ActionPreview): ActionView
+  listForSession(sessionId: string): ActionSummary[]
 }
 
 type State =
@@ -78,7 +87,7 @@ type State =
 interface ActionRecord {
   id: string
   sessionId: string
-  proposal: WriteCall
+  proposal: Proposal
   createdAt: number
   expiresAt: number
   state: State
@@ -109,7 +118,7 @@ export class ActionStore implements ProposalPort {
   /** Store a proposal and return its card. A session has one live card: a
    *  newer proposal cancels its older one if that is still pending or failed
    *  (a failed one is otherwise retryable). */
-  propose(sessionId: string, proposal: WriteCall, preview: ActionPreview): ActionView {
+  propose(sessionId: string, proposal: Proposal, preview: ActionPreview): ActionView {
     this.evictOld()
     const olderId = this.latestBySession.get(sessionId)
     const older = olderId ? this.records.get(olderId) : undefined
@@ -254,7 +263,7 @@ function confirmed(record: ActionRecord, outcome: ActionOutcome): ConfirmResult 
 
 /** The card for a validated write. Exhaustive over write tools, so a new one
  *  cannot ship without a preview. */
-export function previewAction(proposal: WriteCall): ActionPreview {
+export function previewAction(proposal: Proposal): ActionPreview {
   switch (proposal.tool) {
     case 'create_ticket':
       return {
@@ -268,7 +277,10 @@ export function previewAction(proposal: WriteCall): ActionPreview {
     case 'handoff_to_human':
       return {
         title: 'Hand this chat to a person',
-        details: [{ label: 'Reason', value: proposal.args.reason }],
+        details: [
+          { label: 'Reason', value: proposal.args.reason },
+          { label: 'Shared with the support team', value: proposal.draft.summary },
+        ],
         confirmLabel: 'Hand off',
       }
   }

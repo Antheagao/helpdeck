@@ -75,10 +75,13 @@ function textField(
   fields: Fields,
   name: string,
   { min, max }: { min: number; max: number },
+  { singleLine = false }: { singleLine?: boolean } = {},
 ): { value: string } | { error: string } {
   const raw = fields[name]
   if (typeof raw !== 'string') return { error: `${name} must be a string` }
-  const value = raw.trim()
+  // A single-line field has its whitespace runs, newlines included, folded to
+  // one space, so it cannot carry a line of its own into a report.
+  const value = (singleLine ? raw.replace(/\s+/g, ' ') : raw).trim()
   const length = charLength(value)
   if (length < min || length > max) {
     return { error: `${name} must be ${min}-${max} characters` }
@@ -114,7 +117,7 @@ function parseCreateTicket(raw: unknown): ParseResult<ToolArgs['create_ticket']>
 function parseHandoff(raw: unknown): ParseResult<ToolArgs['handoff_to_human']> {
   const fields = asFields(raw)
   if (typeof fields === 'string') return { ok: false, error: fields }
-  const reason = textField(fields, 'reason', LIMITS.reason)
+  const reason = textField(fields, 'reason', LIMITS.reason, { singleLine: true })
   if ('error' in reason) return { ok: false, error: reason.error }
   return { ok: true, args: { reason: reason.value } }
 }
@@ -220,22 +223,14 @@ export function parseToolCall(name: ToolName, raw: unknown): ParseResult<ParsedC
 }
 
 /**
- * Tools offered when HELPDECK_TOOLS is unset.
- *
- * TODO(task 4): add handoff_to_human back once confirming it does something.
- * Until then it can still be enabled explicitly, and confirm fails loudly.
- */
-export const DEFAULT_TOOLS: readonly ToolName[] = ['lookup_order', 'create_ticket']
-
-/**
- * Parse HELPDECK_TOOLS. Unset means the default tools; `none` or an empty
+ * Parse HELPDECK_TOOLS. Unset means every tool; `none` or an empty
  * value means none; otherwise a comma-separated list. The result is in table
  * order, so the offered tool list does not depend on how the operator wrote it.
  *
  * @throws ConfigError for an unknown name, naming the valid ones.
  */
 export function parseEnabledTools(raw: string | undefined): ToolName[] {
-  if (raw === undefined) return [...DEFAULT_TOOLS]
+  if (raw === undefined) return [...TOOL_NAMES]
   const trimmed = raw.trim()
   if (trimmed === '' || trimmed.toLowerCase() === 'none') return []
   const wanted = trimmed.split(',').map((name) => name.trim())

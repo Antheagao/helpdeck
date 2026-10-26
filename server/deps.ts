@@ -6,17 +6,19 @@
 
 import { ActionStore } from './actions.js'
 import { SeededOrderBackend, TicketStore, type OrderBackend } from './backend.js'
-import { makeSessionStore, type ChatDeps } from './chat.js'
+import { makeHandoffSummarizer, makeSessionStore, type ChatDeps } from './chat.js'
+import { HandoffStore, operatorAuth, parseOperatorToken, type HandoffStoreOptions } from './handoff.js'
 import type { LLM } from './llm.js'
 import { FixedWindowLimiter, type RateLimit } from './rate-limit.js'
 import { BM25Index } from './retrieval.js'
-import { DEFAULT_TOOLS, type ToolName } from './tools.js'
+import { TOOL_NAMES, type ToolName } from './tools.js'
 import { Tracer } from './trace.js'
 
 /** Per client address, per window (see rate-limit.ts). */
 export const DEFAULT_LIMITS = {
   chat: { max: 60, windowMs: 10 * 60 * 1000 },
   actions: { max: 20, windowMs: 10 * 60 * 1000 },
+  operator: { max: 120, windowMs: 10 * 60 * 1000 },
 } satisfies Record<string, RateLimit>
 
 /** What the HTTP app needs: the chat pipeline's deps plus everything only the
@@ -24,7 +26,11 @@ export const DEFAULT_LIMITS = {
 export interface AppDeps extends ChatDeps {
   actions: ActionStore
   tickets: TicketStore
-  limiters: { chat: FixedWindowLimiter; actions: FixedWindowLimiter }
+  handoffs: HandoffStore
+  /** Checks an Authorization header against HELPDECK_OPERATOR_TOKEN. Absent
+   *  when no token is set, which leaves the operator API off. */
+  operatorAuth?: (authorization: string | undefined) => boolean
+  limiters: { chat: FixedWindowLimiter; actions: FixedWindowLimiter; operator: FixedWindowLimiter }
 }
 
 export type BuildDepsOptions = {
@@ -33,6 +39,9 @@ export type BuildDepsOptions = {
   tracer?: Tracer
   orders?: OrderBackend
   productName?: string
+  /** HELPDECK_OPERATOR_TOKEN; unset leaves the operator API off. */
+  operatorToken?: string
+  handoffs?: HandoffStoreOptions
   limits?: Partial<typeof DEFAULT_LIMITS>
   /** Clock for action expiry and rate limits; tests inject one. */
   now?: () => number
@@ -42,18 +51,24 @@ export type BuildDepsOptions = {
 export function buildDeps(options: BuildDepsOptions): AppDeps {
   const { llm, now } = options
   const limits = { ...DEFAULT_LIMITS, ...options.limits }
+  const operatorToken = parseOperatorToken(options.operatorToken)
+  const handoffs = new HandoffStore({ now: now ? () => new Date(now()) : undefined, ...options.handoffs })
   return {
     llm,
     index: options.index ?? BM25Index.fromMarkdownDir(options.docsDir),
     tracer: options.tracer ?? new Tracer(undefined),
     sessions: makeSessionStore(llm),
     orders: options.orders ?? new SeededOrderBackend(),
-    enabledTools: options.enabledTools ?? DEFAULT_TOOLS,
+    enabledTools: options.enabledTools ?? TOOL_NAMES,
     actions: new ActionStore({ now }),
     tickets: new TicketStore(now ? () => new Date(now()) : undefined),
+    handoffs,
+    handoffSummarizer: makeHandoffSummarizer(llm),
+    operatorAuth: operatorToken ? operatorAuth(operatorToken) : undefined,
     limiters: {
       chat: new FixedWindowLimiter(limits.chat, now),
       actions: new FixedWindowLimiter(limits.actions, now),
+      operator: new FixedWindowLimiter(limits.operator, now),
     },
     productName: options.productName,
   }

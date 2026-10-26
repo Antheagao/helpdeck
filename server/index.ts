@@ -11,9 +11,10 @@
  *   HELPDECK_DOCS      knowledge-base directory (default ./docs)
  *   HELPDECK_TOOLS     tools offered to the model: a comma-separated list of
  *                      lookup_order, create_ticket, handoff_to_human; "none"
- *                      or empty for none (default: lookup_order, create_ticket).
- *                      Whether a tool needs confirmation is fixed in code,
- *                      not configurable.
+ *                      or empty for none (default: all). Whether a tool needs
+ *                      confirmation is fixed in code, not configurable.
+ *   HELPDECK_OPERATOR_TOKEN  bearer token (at least 32 characters) for the
+ *                      operator API that lists handoffs; unset turns it off
  *   SPANLIGHT_URL      ship traces to a spanlight collector (off when unset)
  */
 
@@ -25,9 +26,18 @@ import type { Executor } from './actions.js'
 import { answer } from './chat.js'
 import { buildDeps, type AppDeps } from './deps.js'
 import { executeWrite } from './execute.js'
+import { HandoffQueueFullError, parseOperatorToken, toOperatorView } from './handoff.js'
 import { TicketLimitError } from './backend.js'
 import { ConfigError, llmFromEnv, type LLM, type ModelProvider } from './llm.js'
-import type { ApiErrorBody, ApiErrorCode, CancelResponse, ChatEvent, ConfirmResponse } from './protocol.js'
+import {
+  MAX_MESSAGE_CHARS,
+  type ApiErrorBody,
+  type ApiErrorCode,
+  type CancelResponse,
+  type ChatEvent,
+  type ConfirmResponse,
+  type OperatorListResponse,
+} from './protocol.js'
 import { clientKey, type FixedWindowLimiter } from './rate-limit.js'
 import { BM25Index } from './retrieval.js'
 import { parseEnabledTools, type ToolName } from './tools.js'
@@ -37,6 +47,12 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 /** Action ids are 16 random bytes in hex; anything else is not an action. */
 const ACTION_ID = /^[0-9a-f]{32}$/
+
+/** Handoff references run H-1001, H-1002, ... */
+const HANDOFF_REFERENCE = /^H-\d{4,9}$/
+
+/** Handoffs per page of the operator list. */
+const OPERATOR_PAGE_SIZE = 50
 
 function apiError(res: express.Response, status: number, code: ApiErrorCode, message: string): void {
   const body: ApiErrorBody = { error: { code, message } }
@@ -96,8 +112,8 @@ export function createApp(deps: AppDeps): express.Express {
       return
     }
     const { message } = req.body as { message?: unknown }
-    if (typeof message !== 'string' || !message.trim() || message.length > 4000) {
-      apiError(res, 400, 'invalid_message', 'message must be a non-empty string under 4000 characters')
+    if (typeof message !== 'string' || !message.trim() || message.length > MAX_MESSAGE_CHARS) {
+      apiError(res, 400, 'invalid_message', `message must be a non-empty string of at most ${MAX_MESSAGE_CHARS} characters`)
       return
     }
 
@@ -140,7 +156,7 @@ export function createApp(deps: AppDeps): express.Express {
     const trace = deps.tracer.start('action-confirm', {}, sessionId)
     // Only the effect itself is memoized, so nothing after it can fail the run
     // and make a retry repeat it.
-    const execute: Executor = (action) => executeWrite(action, { tickets: deps.tickets })
+    const execute: Executor = (action) => executeWrite(action, { tickets: deps.tickets, handoffs: deps.handoffs })
     try {
       // A confirm repeated within an hour of the proposal (the store's retention)
       // replays the stored result; after that the action is not found.
@@ -166,6 +182,12 @@ export function createApp(deps: AppDeps): express.Express {
     } catch (error) {
       if (error instanceof TicketLimitError) {
         apiError(res, 409, 'limit_reached', 'You have reached the limit of tickets for this chat.')
+        return
+      }
+      if (error instanceof HandoffQueueFullError) {
+        // Not consumed: the action stays retryable and the bot keeps answering.
+        console.warn('handoff queue is full; a customer could not be handed off')
+        apiError(res, 409, 'handoff_queue_full', 'The support team cannot take new handoffs right now. Please try again later.')
         return
       }
       console.error('action failed:', error)
@@ -201,6 +223,43 @@ export function createApp(deps: AppDeps): express.Express {
     }
   })
 
+  // The operator API: handoff records hold customer text, so the token is the
+  // boundary. With no token set these routes do not exist (the final handler
+  // answers 404). Marked uncacheable, then limited, then authenticated.
+  const authorize = deps.operatorAuth
+  if (authorize) {
+    // Handoffs hold customer text: no response from these routes, a 429
+    // included, may be stored by a cache.
+    const noStore: express.RequestHandler = (_req, res, next) => {
+      res.setHeader('Cache-Control', 'no-store')
+      next()
+    }
+    const operatorOnly: express.RequestHandler = (req, res, next) => {
+      if (authorize(req.headers.authorization)) {
+        next()
+        return
+      }
+      res.setHeader('WWW-Authenticate', 'Bearer')
+      apiError(res, 401, 'unauthorized', 'A valid operator token is required.')
+    }
+    app.get('/api/operator/handoffs', noStore, rateLimited(deps.limiters.operator), operatorOnly, (_req, res) => {
+      const body: OperatorListResponse = {
+        handoffs: deps.handoffs.list(OPERATOR_PAGE_SIZE).map(toOperatorView),
+        nextCursor: null,
+      }
+      res.json(body)
+    })
+    app.get('/api/operator/handoffs/:reference', noStore, rateLimited(deps.limiters.operator), operatorOnly, (req, res) => {
+      const reference = req.params.reference ?? ''
+      const record = HANDOFF_REFERENCE.test(reference) ? deps.handoffs.get(reference) : undefined
+      if (!record) {
+        apiError(res, 404, 'handoff_not_found', 'No such handoff.')
+        return
+      }
+      res.json(toOperatorView(record))
+    })
+  }
+
   // The built widget and the demo page, when present.
   app.use(express.static(path.join(ROOT, 'widget', 'dist')))
   app.use(express.static(path.join(ROOT, 'demo')))
@@ -232,21 +291,26 @@ export function createApp(deps: AppDeps): express.Express {
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
 if (isMain) {
-  let config: { provider: ModelProvider; llm: LLM; enabledTools: ToolName[] }
+  let config: { provider: ModelProvider; llm: LLM; enabledTools: ToolName[]; operatorToken: string | undefined }
   try {
-    config = { ...llmFromEnv(), enabledTools: parseEnabledTools(process.env.HELPDECK_TOOLS) }
+    config = {
+      ...llmFromEnv(),
+      enabledTools: parseEnabledTools(process.env.HELPDECK_TOOLS),
+      operatorToken: parseOperatorToken(process.env.HELPDECK_OPERATOR_TOKEN),
+    }
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error
     console.error(`helpdeck: ${error.message}`)
     process.exit(1)
   }
-  const { provider, llm, enabledTools } = config
+  const { provider, llm, enabledTools, operatorToken } = config
   const docsDir = process.env.HELPDECK_DOCS || path.join(ROOT, 'docs')
   const deps = buildDeps({
     llm,
     index: BM25Index.fromMarkdownDir(docsDir),
     enabledTools,
     tracer: new Tracer(process.env.SPANLIGHT_URL),
+    operatorToken,
   })
   const port = Number(process.env.PORT || 4319)
   createApp(deps).listen(port, () => {
@@ -254,6 +318,7 @@ if (isMain) {
       `helpdeck on http://127.0.0.1:${port} ` +
         `(provider: ${provider}, model: ${deps.llm.model}, passages: ${deps.index.passages.length}, ` +
         `tools: ${enabledTools.join(',') || 'none'}, ` +
+        `operator api: ${operatorToken ? 'on' : 'off'}, ` +
         `spanlight: ${deps.tracer.enabled ? 'on' : 'off'})`,
     )
   })
