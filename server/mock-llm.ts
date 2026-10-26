@@ -54,13 +54,16 @@ function refusal(offered: Set<string>): string {
   return `I am not able to do that. I can ${list}.${offer}`
 }
 
-/** The first `max` characters, cut back to a word boundary when it is cut. */
+/** The first `max` characters, cut back to a word boundary when it is cut. A
+ *  boundary that would leave under half the room (a short first word, then
+ *  one long unbroken token) is not worth it: that cut would be too short to
+ *  be a valid subject, so the hard cut stays. */
 function cutAtWord(text: string, max: number): string {
   const chars = [...text]
   if (chars.length <= max) return text
   const cut = chars.slice(0, max).join('')
   const space = cut.lastIndexOf(' ')
-  return (space > 0 ? cut.slice(0, space) : cut).trimEnd()
+  return (space >= max / 2 ? cut.slice(0, space) : cut).trimEnd()
 }
 
 /** The latest user turn that contains a match, searched newest first. */

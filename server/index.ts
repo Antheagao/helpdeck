@@ -59,9 +59,12 @@ function apiError(res: express.Response, status: number, code: ApiErrorCode, mes
   res.status(status).json(body)
 }
 
+/** An unknown action, another session's, or one long gone: all the same answer. */
+const ACTION_NOT_FOUND = 'That request is no longer available. Please ask again.'
+
 /** How a refused confirm or cancel is reported to the client. */
 const REFUSALS = {
-  not_found: { status: 404, code: 'action_not_found', message: 'No such action.' },
+  not_found: { status: 404, code: 'action_not_found', message: ACTION_NOT_FOUND },
   action_not_pending: {
     status: 409,
     code: 'action_not_pending',
@@ -149,7 +152,7 @@ export function createApp(deps: AppDeps): express.Express {
     }
     const id = req.params.id ?? ''
     if (!ACTION_ID.test(id)) {
-      apiError(res, 404, 'action_not_found', 'No such action.')
+      apiError(res, 404, 'action_not_found', ACTION_NOT_FOUND)
       return
     }
 
@@ -206,7 +209,7 @@ export function createApp(deps: AppDeps): express.Express {
       }
       const id = req.params.id ?? ''
       if (!ACTION_ID.test(id)) {
-        apiError(res, 404, 'action_not_found', 'No such action.')
+        apiError(res, 404, 'action_not_found', ACTION_NOT_FOUND)
         return
       }
       const cancelled = deps.actions.cancel(id, sessionId)

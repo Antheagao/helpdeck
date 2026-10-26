@@ -204,7 +204,7 @@ describe('write proposals', () => {
     ] as const) {
       const res = await confirm(app, id, session)
       expect(res.status).toBe(404)
-      expect(res.body).toEqual({ error: { code: 'action_not_found', message: 'No such action.' } })
+      expect(res.body).toEqual({ error: { code: 'action_not_found', message: 'That request is no longer available. Please ask again.' } })
     }
     expect((await cancel(app, action.id, 'intruder-session')).status).toBe(404)
     // The owner's action was untouched by all of that.
@@ -420,6 +420,14 @@ describe('mock tool policy', () => {
     expect(args.subject.length).toBeLessThanOrEqual(80)
     expect(args.subject).toMatch(/^(lamp )*lamp$/)
     expect(args.description).toBe(message.trim())
+  })
+
+  it('keeps a long unbroken token after a short first word, rather than cutting the subject to nothing', async () => {
+    const message = `Open a ticket: my ${'x'.repeat(200)} broke`
+    const { toolCalls } = await mock.complete([user(message)], { tools: all })
+    const subject = (toolCalls[0]?.arguments as { subject: string }).subject
+    expect(subject).toBe(`my ${'x'.repeat(77)}`)
+    expect(subject.length).toBe(80)
   })
 
   it('reads intent only from user turns', async () => {

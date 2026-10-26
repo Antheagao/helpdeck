@@ -13,6 +13,9 @@ One script tag embeds it on any page:
 <script src="https://your-host/widget.js" defer data-endpoint="/api/chat"></script>
 ```
 
+The confirm and cancel buttons on action cards post to `/api/actions`, derived from `data-endpoint` by swapping a trailing `/chat`.
+If your chat endpoint does not end in `/chat`, add `data-actions-endpoint` with the matching actions path.
+
 ## Why it is built this way
 
 Retrieval-augmented chat is usually assembled from a framework and two or three hosted services.
