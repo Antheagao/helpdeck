@@ -20,6 +20,19 @@ function cost(model: string, inputTokens: number, outputTokens: number): number 
   return (inputTokens * entry[0] + outputTokens * entry[1]) / 1e6
 }
 
+/** Customer email addresses are personal data and must not leave for the
+ *  collector, whether they sit in a question, an answer, or an error text. */
+const EMAIL_PATTERN = /[^\s@<>()",;]+@[^\s@<>()",;]+\.[^\s@<>()",;]+/g
+
+function redactEmails<T>(value: T): T {
+  if (typeof value === 'string') return value.replace(EMAIL_PATTERN, '[email]') as T
+  if (Array.isArray(value)) return value.map(redactEmails) as T
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, redactEmails(v)])) as T
+  }
+  return value
+}
+
 interface SpanRecord {
   id: string
   trace_id: string
@@ -106,11 +119,11 @@ export class TraceHandle {
           started_at: this.startedAt,
           ended_at: Date.now() / 1000,
           status: this.status,
-          session: this.session,
-          metadata: this.metadata,
+          session: redactEmails(this.session),
+          metadata: redactEmails(this.metadata),
         },
       ],
-      spans: this.spans,
+      spans: this.spans.map((span) => redactEmails(span)),
     }
   }
 }
@@ -134,6 +147,8 @@ export class Tracer {
   /** Ship a finished trace; errors are swallowed (once, loudly). */
   async send(trace: TraceHandle): Promise<void> {
     if (!this.url) return
+    // A trace that did no traced work (a replayed confirm) is not worth a row.
+    if (trace.payload().spans.length === 0) return
     try {
       await this.fetchFn(`${this.url.replace(/\/$/, '')}/api/ingest`, {
         method: 'POST',

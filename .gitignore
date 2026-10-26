@@ -13,3 +13,6 @@ coverage/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Agent tooling (reviewer and assistant scratch state)
+.claude/

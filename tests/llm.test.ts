@@ -628,7 +628,7 @@ describe('OpenAILLM', () => {
 
 describe('MockLLM', () => {
   const withContext = (passage: string): ChatMessage[] => [
-    { role: 'system', content: `Context:\n[1] setup.md - Install\n${passage}\n\n---` },
+    { role: 'system', content: `<documentation>\n[1] setup.md - Install\n${passage}\n</documentation>\n\n---` },
     { role: 'user', content: 'How do I install it?' },
   ]
 

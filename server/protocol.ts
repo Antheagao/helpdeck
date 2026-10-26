@@ -72,6 +72,10 @@ export type ApiErrorCode =
   | 'action_failed'
   | 'rate_limited'
   | 'unauthorized'
+  | 'invalid_body'
+  | 'payload_too_large'
+  | 'not_found'
+  | 'internal_error'
 
 /** Body of every JSON error from the new and migrated endpoints. Clients
  *  branch on `code`; `message` is for people. */

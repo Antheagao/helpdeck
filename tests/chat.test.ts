@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 
-import { answer, makeSessionStore, makeSummarizer, type ChatDeps } from '../server/chat.js'
+import { answer, makeSessionStore, makeSummarizer } from '../server/chat.js'
+import { buildDeps, type AppDeps } from '../server/deps.js'
 import { createApp } from '../server/index.js'
 import { AnthropicLLM, OpenAILLM, type LLM } from '../server/llm.js'
 import { extractiveSummarizer } from '../server/memory.js'
@@ -14,18 +15,16 @@ import { Tracer } from '../server/trace.js'
 
 const DOCS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs')
 
-function makeDeps(captured?: { url: string; body: unknown }[]): ChatDeps {
-  const llm = new MockLLM()
+function makeDeps(captured?: { url: string; body: unknown }[]): AppDeps {
   const fetchFn = (async (url: unknown, init?: { body?: unknown }) => {
     captured?.push({ url: String(url), body: JSON.parse(String(init?.body)) })
     return new Response('{}', { status: 202 })
   }) as typeof fetch
-  return {
-    llm,
+  return buildDeps({
+    llm: new MockLLM(),
     index: BM25Index.fromMarkdownDir(DOCS),
     tracer: new Tracer(captured ? 'http://spanlight.test' : undefined, fetchFn),
-    sessions: makeSessionStore(llm),
-  }
+  })
 }
 
 const sse = (app: ReturnType<typeof createApp>, body: object) =>
@@ -119,7 +118,7 @@ describe('makeSummarizer', () => {
 describe('provider failures', () => {
   const GENERIC = 'The assistant hit an internal error. Please try again.'
 
-  function depsFor(llm: LLM): ChatDeps {
+  function depsFor(llm: LLM): AppDeps {
     return { ...makeDeps(), llm, sessions: makeSessionStore(llm) }
   }
 

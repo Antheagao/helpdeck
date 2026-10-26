@@ -187,15 +187,55 @@ export const TOOLS: ToolTable = {
 /** Every tool, in the fixed order of the table above. */
 export const TOOL_NAMES = Object.keys(TOOLS) as ToolName[]
 
+/** Narrow a name the model sent, which may be anything, to a known tool. */
+export function isToolName(name: string): name is ToolName {
+  return TOOL_NAMES.some((known) => known === name)
+}
+
+/** One validated call: the tool and its typed arguments. */
+export type ParsedCall = { [K in ToolName]: { tool: K; args: ToolArgs[K] } }[ToolName]
+export type ReadCall = Extract<ParsedCall, { tool: ReadToolName }>
+export type WriteCall = Extract<ParsedCall, { tool: WriteToolName }>
+
+export function isReadCall(call: ParsedCall): call is ReadCall {
+  return TOOLS[call.tool].access === 'read'
+}
+
+/** Validate a call's arguments against its tool. */
+export function parseToolCall(name: ToolName, raw: unknown): ParseResult<ParsedCall> {
+  switch (name) {
+    case 'lookup_order': {
+      const parsed = TOOLS.lookup_order.parse(raw)
+      return parsed.ok ? { ok: true, args: { tool: name, args: parsed.args } } : parsed
+    }
+    case 'create_ticket': {
+      const parsed = TOOLS.create_ticket.parse(raw)
+      return parsed.ok ? { ok: true, args: { tool: name, args: parsed.args } } : parsed
+    }
+    case 'handoff_to_human': {
+      const parsed = TOOLS.handoff_to_human.parse(raw)
+      return parsed.ok ? { ok: true, args: { tool: name, args: parsed.args } } : parsed
+    }
+  }
+}
+
 /**
- * Parse HELPDECK_TOOLS. Unset means every tool; `none` or an empty value means
- * none; otherwise a comma-separated list. The result is in table order, so the
- * offered tool list does not depend on how the operator wrote it.
+ * Tools offered when HELPDECK_TOOLS is unset.
+ *
+ * TODO(task 4): add handoff_to_human back once confirming it does something.
+ * Until then it can still be enabled explicitly, and confirm fails loudly.
+ */
+export const DEFAULT_TOOLS: readonly ToolName[] = ['lookup_order', 'create_ticket']
+
+/**
+ * Parse HELPDECK_TOOLS. Unset means the default tools; `none` or an empty
+ * value means none; otherwise a comma-separated list. The result is in table
+ * order, so the offered tool list does not depend on how the operator wrote it.
  *
  * @throws ConfigError for an unknown name, naming the valid ones.
  */
 export function parseEnabledTools(raw: string | undefined): ToolName[] {
-  if (raw === undefined) return [...TOOL_NAMES]
+  if (raw === undefined) return [...DEFAULT_TOOLS]
   const trimmed = raw.trim()
   if (trimmed === '' || trimmed.toLowerCase() === 'none') return []
   const wanted = trimmed.split(',').map((name) => name.trim())

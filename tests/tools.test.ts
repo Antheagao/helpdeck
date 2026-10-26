@@ -15,6 +15,7 @@ import {
 } from '../server/backend.js'
 import { ConfigError } from '../server/llm.js'
 import {
+  DEFAULT_TOOLS,
   LIMITS,
   MAX_RESULT_CHARS,
   TOOLS,
@@ -177,8 +178,15 @@ describe('tool table', () => {
 })
 
 describe('parseEnabledTools', () => {
-  it('means every tool when unset', () => {
-    expect(parseEnabledTools(undefined)).toEqual(['lookup_order', 'create_ticket', 'handoff_to_human'])
+  it('means the default tools when unset', () => {
+    // Handoff joins the defaults in task 4; until then it must be asked for.
+    expect(parseEnabledTools(undefined)).toEqual(['lookup_order', 'create_ticket'])
+    expect(parseEnabledTools(undefined)).toEqual([...DEFAULT_TOOLS])
+  })
+
+  it('still allows handoff to be enabled explicitly, or every tool to be named', () => {
+    expect(parseEnabledTools('handoff_to_human')).toEqual(['handoff_to_human'])
+    expect(parseEnabledTools('lookup_order,create_ticket,handoff_to_human')).toEqual([...TOOL_NAMES])
   })
 
   it('means none for an empty value or none', () => {

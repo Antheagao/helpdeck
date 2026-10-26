@@ -1,6 +1,7 @@
 /**
  * The helpdeck server: one Express app serving the chat API (SSE streaming),
- * the embeddable widget bundle, and the demo page.
+ * the action confirm/cancel API, the embeddable widget bundle, and the demo
+ * page.
  *
  * Environment:
  *   PORT               listen port (default 4319)
@@ -8,6 +9,11 @@
  *   ANTHROPIC_API_KEY  use Claude (else OPENAI_API_KEY, else the offline mock)
  *   HELPDECK_MODEL     override the model id
  *   HELPDECK_DOCS      knowledge-base directory (default ./docs)
+ *   HELPDECK_TOOLS     tools offered to the model: a comma-separated list of
+ *                      lookup_order, create_ticket, handoff_to_human; "none"
+ *                      or empty for none (default: lookup_order, create_ticket).
+ *                      Whether a tool needs confirmation is fixed in code,
+ *                      not configurable.
  *   SPANLIGHT_URL      ship traces to a spanlight collector (off when unset)
  */
 
@@ -15,16 +21,64 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 
-import { answer, makeSessionStore, type ChatDeps } from './chat.js'
+import type { Executor } from './actions.js'
+import { answer } from './chat.js'
+import { buildDeps, type AppDeps } from './deps.js'
+import { executeWrite } from './execute.js'
+import { TicketLimitError } from './backend.js'
 import { ConfigError, llmFromEnv, type LLM, type ModelProvider } from './llm.js'
+import type { ApiErrorBody, ApiErrorCode, CancelResponse, ChatEvent, ConfirmResponse } from './protocol.js'
+import { clientKey, type FixedWindowLimiter } from './rate-limit.js'
 import { BM25Index } from './retrieval.js'
+import { parseEnabledTools, type ToolName } from './tools.js'
 import { Tracer } from './trace.js'
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
-export function createApp(deps: ChatDeps): express.Express {
+/** Action ids are 16 random bytes in hex; anything else is not an action. */
+const ACTION_ID = /^[0-9a-f]{32}$/
+
+function apiError(res: express.Response, status: number, code: ApiErrorCode, message: string): void {
+  const body: ApiErrorBody = { error: { code, message } }
+  res.status(status).json(body)
+}
+
+/** How a refused confirm or cancel is reported to the client. */
+const REFUSALS = {
+  not_found: { status: 404, code: 'action_not_found', message: 'No such action.' },
+  action_not_pending: {
+    status: 409,
+    code: 'action_not_pending',
+    message: 'This request was already cancelled or carried out.',
+  },
+  action_expired: { status: 409, code: 'action_expired', message: 'This request expired. Please ask again.' },
+} as const
+
+/** Reject with 429 once a client address has used its window. Mounted before
+ *  the body parser on each limited route, so a flood is turned away before
+ *  any body is read. */
+function rateLimited(limiter: FixedWindowLimiter): express.RequestHandler {
+  return (req, res, next) => {
+    // req.ip is the socket address: no proxy headers are trusted.
+    const decision = limiter.hit(clientKey(req.ip))
+    if (decision.allowed) {
+      next()
+      return
+    }
+    res.setHeader('Retry-After', String(decision.retryAfterSeconds))
+    apiError(res, 429, 'rate_limited', 'Too many requests. Please wait a moment and try again.')
+  }
+}
+
+/** The session id the widget sent, or null when it is not an 8-64 character string. */
+function sessionIdFrom(body: unknown): string | null {
+  const { sessionId } = (body ?? {}) as { sessionId?: unknown }
+  return typeof sessionId === 'string' && sessionId.length >= 8 && sessionId.length <= 64 ? sessionId : null
+}
+
+export function createApp(deps: AppDeps): express.Express {
   const app = express()
-  app.use(express.json({ limit: '32kb' }))
+  const jsonBody = express.json({ limit: '32kb' })
 
   app.get('/healthz', (_req, res) => {
     res.json({
@@ -35,14 +89,15 @@ export function createApp(deps: ChatDeps): express.Express {
     })
   })
 
-  app.post('/api/chat', async (req, res) => {
-    const { sessionId, message } = req.body as { sessionId?: unknown; message?: unknown }
-    if (typeof sessionId !== 'string' || sessionId.length < 8 || sessionId.length > 64) {
-      res.status(400).json({ error: 'sessionId must be a string of 8-64 characters' })
+  app.post('/api/chat', rateLimited(deps.limiters.chat), jsonBody, async (req, res) => {
+    const sessionId = sessionIdFrom(req.body)
+    if (!sessionId) {
+      apiError(res, 400, 'invalid_session_id', 'sessionId must be a string of 8-64 characters')
       return
     }
+    const { message } = req.body as { message?: unknown }
     if (typeof message !== 'string' || !message.trim() || message.length > 4000) {
-      res.status(400).json({ error: 'message must be a non-empty string under 4000 characters' })
+      apiError(res, 400, 'invalid_message', 'message must be a non-empty string under 4000 characters')
       return
     }
 
@@ -51,60 +106,154 @@ export function createApp(deps: ChatDeps): express.Express {
       'cache-control': 'no-cache',
       connection: 'keep-alive',
     })
-    const send = (event: string, data: unknown) => {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    const send = (event: ChatEvent) => {
+      res.write(`event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`)
     }
 
     try {
-      const result = await answer(
-        deps,
-        sessionId,
-        message.trim(),
-        (token) => send('token', { token }),
-        (sources) => send('sources', { sources }),
-      )
-      send('done', {
-        model: result.model,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
+      const result = await answer(deps, sessionId, message.trim(), send)
+      send({
+        event: 'done',
+        data: { model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens },
       })
     } catch (error) {
-      send('error', { error: 'The assistant hit an internal error. Please try again.' })
+      send({ event: 'error', data: { error: 'The assistant hit an internal error. Please try again.' } })
       console.error('chat failed:', error)
     }
     res.end()
+  })
+
+  // The only route that executes a write. Express 4 does not forward a
+  // rejected async handler, so each handler below catches for itself.
+  app.post('/api/actions/:id/confirm', rateLimited(deps.limiters.actions), jsonBody, async (req, res) => {
+    const sessionId = sessionIdFrom(req.body)
+    if (!sessionId) {
+      apiError(res, 400, 'invalid_session_id', 'sessionId must be a string of 8-64 characters')
+      return
+    }
+    const id = req.params.id ?? ''
+    if (!ACTION_ID.test(id)) {
+      apiError(res, 404, 'action_not_found', 'No such action.')
+      return
+    }
+
+    const trace = deps.tracer.start('action-confirm', {}, sessionId)
+    // Only the effect itself is memoized, so nothing after it can fail the run
+    // and make a retry repeat it.
+    const execute: Executor = (action) => executeWrite(action, { tickets: deps.tickets })
+    try {
+      // A confirm repeated within an hour of the proposal (the store's retention)
+      // replays the stored result; after that the action is not found.
+      const confirmed = await trace.span('confirm-action', 'tool', () => {
+        return deps.actions.confirm(id, sessionId, execute, {
+          onFirstDone: (outcome) => {
+            deps.sessions.get(sessionId).add({ role: 'assistant', content: outcome.message })
+          },
+        })
+      }, (record, result) => {
+        record.attributes = result.ok ? { tool: result.tool, result: result.outcome.result } : { refused: result.code }
+      })
+      if (!confirmed.ok) {
+        const { status, code, message } = REFUSALS[confirmed.code]
+        apiError(res, status, code, message)
+        return
+      }
+      const body: ConfirmResponse = {
+        action: { id: confirmed.id, tool: confirmed.tool, status: 'done', result: confirmed.outcome.result },
+        message: confirmed.outcome.message,
+      }
+      res.json(body)
+    } catch (error) {
+      if (error instanceof TicketLimitError) {
+        apiError(res, 409, 'limit_reached', 'You have reached the limit of tickets for this chat.')
+        return
+      }
+      console.error('action failed:', error)
+      apiError(res, 500, 'action_failed', 'Something went wrong. Please try again.')
+    } finally {
+      void deps.tracer.send(trace)
+    }
+  })
+
+  app.post('/api/actions/:id/cancel', rateLimited(deps.limiters.actions), jsonBody, (req, res) => {
+    try {
+      const sessionId = sessionIdFrom(req.body)
+      if (!sessionId) {
+        apiError(res, 400, 'invalid_session_id', 'sessionId must be a string of 8-64 characters')
+        return
+      }
+      const id = req.params.id ?? ''
+      if (!ACTION_ID.test(id)) {
+        apiError(res, 404, 'action_not_found', 'No such action.')
+        return
+      }
+      const cancelled = deps.actions.cancel(id, sessionId)
+      if (!cancelled.ok) {
+        const { status, code, message } = REFUSALS[cancelled.code]
+        apiError(res, status, code, message)
+        return
+      }
+      const body: CancelResponse = { action: { id: cancelled.id, tool: cancelled.tool, status: 'cancelled' } }
+      res.json(body)
+    } catch (error) {
+      console.error('cancel failed:', error)
+      apiError(res, 500, 'action_failed', 'Something went wrong. Please try again.')
+    }
   })
 
   // The built widget and the demo page, when present.
   app.use(express.static(path.join(ROOT, 'widget', 'dist')))
   app.use(express.static(path.join(ROOT, 'demo')))
 
+  // Nothing below this point may answer with Express's HTML pages: they carry
+  // stack traces and absolute paths.
+  app.use((_req, res) => {
+    apiError(res, 404, 'not_found', 'Not found.')
+  })
+  app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) {
+      next(error)
+      return
+    }
+    // body-parser tags its failures with a `type`.
+    const type = typeof error === 'object' && error !== null && 'type' in error ? error.type : undefined
+    if (type === 'entity.parse.failed') {
+      apiError(res, 400, 'invalid_body', 'The request body must be valid JSON.')
+    } else if (type === 'entity.too.large') {
+      apiError(res, 413, 'payload_too_large', 'The request body is too large.')
+    } else {
+      console.error('request failed:', error)
+      apiError(res, 500, 'internal_error', 'Something went wrong. Please try again.')
+    }
+  })
+
   return app
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
 if (isMain) {
-  let config: { provider: ModelProvider; llm: LLM }
+  let config: { provider: ModelProvider; llm: LLM; enabledTools: ToolName[] }
   try {
-    config = llmFromEnv()
+    config = { ...llmFromEnv(), enabledTools: parseEnabledTools(process.env.HELPDECK_TOOLS) }
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error
     console.error(`helpdeck: ${error.message}`)
     process.exit(1)
   }
-  const { provider, llm } = config
+  const { provider, llm, enabledTools } = config
   const docsDir = process.env.HELPDECK_DOCS || path.join(ROOT, 'docs')
-  const deps: ChatDeps = {
+  const deps = buildDeps({
     llm,
     index: BM25Index.fromMarkdownDir(docsDir),
+    enabledTools,
     tracer: new Tracer(process.env.SPANLIGHT_URL),
-    sessions: makeSessionStore(llm),
-  }
+  })
   const port = Number(process.env.PORT || 4319)
   createApp(deps).listen(port, () => {
     console.log(
       `helpdeck on http://127.0.0.1:${port} ` +
         `(provider: ${provider}, model: ${deps.llm.model}, passages: ${deps.index.passages.length}, ` +
+        `tools: ${enabledTools.join(',') || 'none'}, ` +
         `spanlight: ${deps.tracer.enabled ? 'on' : 'off'})`,
     )
   })
