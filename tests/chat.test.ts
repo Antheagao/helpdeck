@@ -2,11 +2,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import request from 'supertest'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { answer, makeSessionStore, type ChatDeps } from '../server/chat.js'
+import { answer, makeSessionStore, makeSummarizer, type ChatDeps } from '../server/chat.js'
 import { createApp } from '../server/index.js'
-import { MockLLM } from '../server/llm.js'
+import { AnthropicLLM, OpenAILLM, type LLM } from '../server/llm.js'
+import { extractiveSummarizer } from '../server/memory.js'
+import { MockLLM } from '../server/mock-llm.js'
 import { BM25Index } from '../server/retrieval.js'
 import { Tracer } from '../server/trace.js'
 
@@ -90,5 +92,87 @@ describe('tracing', () => {
     const llmSpan = batch.spans.find((s) => s.kind === 'llm')!
     expect(llmSpan.model).toBe('mock-1')
     expect(llmSpan.cost_usd).toBeNull() // unknown model: no made-up cost
+  })
+})
+
+describe('makeSummarizer', () => {
+  it('uses the extractive summarizer for the mock', () => {
+    expect(makeSummarizer(new MockLLM())).toBe(extractiveSummarizer)
+  })
+
+  it('asks a real model to write the summary', async () => {
+    const prompts: string[] = []
+    const llm: LLM = {
+      model: 'fake',
+      async complete(messages) {
+        prompts.push(messages.map((m) => m.content).join('\n'))
+        return { text: 'new summary', toolCalls: [], finishReason: 'stop', model: 'fake', inputTokens: 0, outputTokens: 0 }
+      },
+    }
+    const summary = await makeSummarizer(llm)([{ role: 'user', content: 'my order is late' }], 'old summary')
+    expect(summary).toBe('new summary')
+    expect(prompts[0]).toContain('old summary')
+    expect(prompts[0]).toContain('user: my order is late')
+  })
+})
+
+describe('provider failures', () => {
+  const GENERIC = 'The assistant hit an internal error. Please try again.'
+
+  function depsFor(llm: LLM): ChatDeps {
+    return { ...makeDeps(), llm, sessions: makeSessionStore(llm) }
+  }
+
+  it('turns a mid-stream provider error into an SSE error and remembers nothing', async () => {
+    const frames = [
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Partial ' } },
+      { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+    ]
+    const fetchFn = (async () =>
+      new Response(frames.map((f) => `event: ${f.type}\ndata: ${JSON.stringify(f)}\n\n`).join(''), {
+        status: 200,
+      })) as typeof fetch
+    const deps = depsFor(new AnthropicLLM('test-key', { fetchFn }))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await sse(createApp(deps), { sessionId: 'failing-session', message: 'What is helpdeck?' })
+      const body = res.body as string
+      expect(body).toContain('event: error')
+      expect(body).toContain(GENERIC)
+      expect(body).not.toContain('event: done')
+      expect(body).not.toContain('overloaded_error')
+      expect(deps.sessions.get('failing-session').render().turns).toHaveLength(0)
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
+  it('never logs or returns a key echoed in the provider HTTP error body', async () => {
+    const echoed = 'sk-proj-********************abcd'
+    const fetchFn = (async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            message: `Incorrect API key provided: ${echoed}.`,
+            type: 'invalid_request_error',
+            code: 'invalid_api_key',
+          },
+        }),
+        { status: 401 },
+      )) as typeof fetch
+    const deps = depsFor(new OpenAILLM('test-key', { fetchFn }))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await sse(createApp(deps), { sessionId: 'bad-key-session', message: 'What is helpdeck?' })
+      const output = JSON.stringify(logged.mock.calls, (_k, v: unknown) =>
+        v instanceof Error ? { message: v.message, stack: v.stack } : v,
+      )
+      expect(output).toContain('openai: HTTP 401 invalid_request_error invalid_api_key')
+      expect(output).not.toContain('sk-')
+      expect(res.body as string).toContain(GENERIC)
+      expect(res.body as string).not.toContain('sk-')
+    } finally {
+      logged.mockRestore()
+    }
   })
 })

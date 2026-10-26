@@ -4,6 +4,7 @@
  *
  * Environment:
  *   PORT               listen port (default 4319)
+ *   MODEL_PROVIDER     anthropic | openai | mock; unset picks by key (below)
  *   ANTHROPIC_API_KEY  use Claude (else OPENAI_API_KEY, else the offline mock)
  *   HELPDECK_MODEL     override the model id
  *   HELPDECK_DOCS      knowledge-base directory (default ./docs)
@@ -15,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 
 import { answer, makeSessionStore, type ChatDeps } from './chat.js'
-import { llmFromEnv } from './llm.js'
+import { ConfigError, llmFromEnv, type LLM, type ModelProvider } from './llm.js'
 import { BM25Index } from './retrieval.js'
 import { Tracer } from './trace.js'
 
@@ -83,7 +84,15 @@ export function createApp(deps: ChatDeps): express.Express {
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
 if (isMain) {
-  const llm = llmFromEnv()
+  let config: { provider: ModelProvider; llm: LLM }
+  try {
+    config = llmFromEnv()
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error
+    console.error(`helpdeck: ${error.message}`)
+    process.exit(1)
+  }
+  const { provider, llm } = config
   const docsDir = process.env.HELPDECK_DOCS || path.join(ROOT, 'docs')
   const deps: ChatDeps = {
     llm,
@@ -95,7 +104,7 @@ if (isMain) {
   createApp(deps).listen(port, () => {
     console.log(
       `helpdeck on http://127.0.0.1:${port} ` +
-        `(model: ${deps.llm.model}, passages: ${deps.index.passages.length}, ` +
+        `(provider: ${provider}, model: ${deps.llm.model}, passages: ${deps.index.passages.length}, ` +
         `spanlight: ${deps.tracer.enabled ? 'on' : 'off'})`,
     )
   })

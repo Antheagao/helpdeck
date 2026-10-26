@@ -4,7 +4,7 @@
  */
 
 import type { LLM, ChatMessage } from './llm.js'
-import { MockLLM } from './llm.js'
+import { MockLLM } from './mock-llm.js'
 import { ConversationMemory, SessionStore, extractiveSummarizer, type Summarizer } from './memory.js'
 import type { BM25Index, Hit } from './retrieval.js'
 import type { Tracer } from './trace.js'
@@ -46,8 +46,13 @@ export function llmSummarizer(llm: LLM): Summarizer {
   }
 }
 
+/** The offline mock cannot write prose, so it gets the extractive summarizer. */
+export function makeSummarizer(llm: LLM): Summarizer {
+  return llm instanceof MockLLM ? extractiveSummarizer : llmSummarizer(llm)
+}
+
 export function makeSessionStore(llm: LLM): SessionStore {
-  const summarize = llm instanceof MockLLM ? extractiveSummarizer : llmSummarizer(llm)
+  const summarize = makeSummarizer(llm)
   return new SessionStore(
     () => new ConversationMemory({ budgetTokens: 2000, keepRecentTurns: 6, summarize }),
   )
@@ -105,7 +110,7 @@ export async function answer(
     const messages = buildMessages(product, hits, summary, turns, question)
 
     const completion = await trace.span('answer', 'llm', async () => {
-      return deps.llm.complete(messages, onToken)
+      return deps.llm.complete(messages, { onToken })
     }, (record, result) => {
       trace.recordLlmUsage(record, result.model, result.inputTokens, result.outputTokens)
       record.input = question

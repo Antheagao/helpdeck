@@ -43,6 +43,7 @@ HELPDECK_MODEL=claude-haiku-4-5
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `4319` | Listen port |
+| `MODEL_PROVIDER` | unset | `anthropic`, `openai`, or `mock`. Unset picks by key (Anthropic, then OpenAI, then the mock). An explicit value needs its key, and `mock` refuses to start beside a key or `HELPDECK_MODEL`, so a demo can never spend |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | unset | Provider; unset means the offline mock |
 | `HELPDECK_MODEL` | per provider | Override the model id |
 | `HELPDECK_DOCS` | `./docs` | Knowledge-base directory |
@@ -93,7 +94,8 @@ The test suite runs entirely against the mock model, so CI needs no secrets.
 |---|---|
 | `server/memory.ts` | Token-budgeted memory, rolling summarization, session store |
 | `server/retrieval.ts` | BM25 index with heading weighting |
-| `server/llm.ts` | Anthropic / OpenAI streaming over plain `fetch`, plus the mock |
+| `server/llm.ts` | Anthropic / OpenAI streaming with tool calls over plain `fetch`, and provider selection |
+| `server/mock-llm.ts` | The offline mock model |
 | `server/chat.ts` | The pipeline: retrieve, build prompt, stream, remember |
 | `server/trace.ts` | spanlight export with cost estimation |
 | `widget/` | React chat widget, built as one self-mounting IIFE bundle |
