@@ -339,6 +339,7 @@ describe('a model that has been taken over', () => {
     const seenTools: (string[] | undefined)[] = []
     const llm: LLM = {
       model: 'spy',
+      offline: false,
       async complete(_messages, options) {
         seenTools.push(options?.tools?.map((t) => t.name))
         return { text: 'ok', toolCalls: [], finishReason: 'stop', model: 'spy', inputTokens: 0, outputTokens: 0 }

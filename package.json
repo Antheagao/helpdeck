@@ -11,7 +11,9 @@
     "build": "tsc --noEmit && tsc --noEmit -p widget",
     "test": "vitest run",
     "widget:dev": "vite --config widget/vite.config.ts",
-    "widget:build": "vite build --config widget/vite.config.ts"
+    "widget:build": "vite build --config widget/vite.config.ts",
+    "eval": "tsx evals/run.ts",
+    "eval:check": "tsx evals/run.ts --check"
   },
   "dependencies": {
     "express": "^4.21.2"

@@ -20,7 +20,6 @@ import {
 } from './handoff.js'
 import type { ChatMessage, LLM } from './llm.js'
 import { ConversationMemory, SessionStore, extractiveSummarizer, type Summarizer } from './memory.js'
-import { MockLLM } from './mock-llm.js'
 import type { ChatEvent, Source } from './protocol.js'
 import type { BM25Index, Hit } from './retrieval.js'
 import type { TraceHandle, Tracer } from './trace.js'
@@ -88,14 +87,14 @@ export function llmSummarizer(llm: LLM): Summarizer {
   }
 }
 
-/** The offline mock cannot write prose, so it gets the extractive summarizer. */
+/** An offline model cannot write prose, so it gets the extractive summarizer. */
 export function makeSummarizer(llm: LLM): Summarizer {
-  return llm instanceof MockLLM ? extractiveSummarizer : llmSummarizer(llm)
+  return llm.offline ? extractiveSummarizer : llmSummarizer(llm)
 }
 
-/** The mock has no prose to offer a handoff; a real model writes the recap. */
+/** An offline model has no prose to offer a handoff; a real model writes the recap. */
 export function makeHandoffSummarizer(llm: LLM): ProseSummarizer | null {
-  return llm instanceof MockLLM ? null : handoffProseSummarizer(llm)
+  return llm.offline ? null : handoffProseSummarizer(llm)
 }
 
 export function makeSessionStore(llm: LLM): SessionStore {

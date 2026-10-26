@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
 
-import { answer, makeSessionStore, makeSummarizer } from '../server/chat.js'
+import { answer, makeHandoffSummarizer, makeSessionStore, makeSummarizer } from '../server/chat.js'
 import { buildDeps, type AppDeps } from '../server/deps.js'
 import { createApp } from '../server/index.js'
 import { AnthropicLLM, OpenAILLM, type LLM } from '../server/llm.js'
@@ -94,6 +94,23 @@ describe('tracing', () => {
   })
 })
 
+describe('offline models', () => {
+  it('take the extractive path, and a wrapper that forwards offline keeps it', () => {
+    const mock = new MockLLM()
+    const wrapped: LLM = { model: 'wrapped', offline: mock.offline, complete: (m, o) => mock.complete(m, o) }
+    for (const llm of [mock, wrapped]) {
+      expect(makeSummarizer(llm)).toBe(extractiveSummarizer)
+      expect(makeHandoffSummarizer(llm)).toBeNull()
+    }
+  })
+
+  it('give a real model the prose summarizers', () => {
+    const online: LLM = { model: 'real', offline: false, complete: async () => { throw new Error('unused') } }
+    expect(makeSummarizer(online)).not.toBe(extractiveSummarizer)
+    expect(makeHandoffSummarizer(online)).toBeTypeOf('function')
+  })
+})
+
 describe('makeSummarizer', () => {
   it('uses the extractive summarizer for the mock', () => {
     expect(makeSummarizer(new MockLLM())).toBe(extractiveSummarizer)
@@ -103,6 +120,7 @@ describe('makeSummarizer', () => {
     const prompts: string[] = []
     const llm: LLM = {
       model: 'fake',
+      offline: false,
       async complete(messages) {
         prompts.push(messages.map((m) => m.content).join('\n'))
         return { text: 'new summary', toolCalls: [], finishReason: 'stop', model: 'fake', inputTokens: 0, outputTokens: 0 }

@@ -98,6 +98,7 @@ function renderToolResult(content: string): string {
 
 export class MockLLM implements LLM {
   readonly model = 'mock-1'
+  readonly offline = true
   private readonly tokenDelayMs: number
 
   constructor({ tokenDelayMs = 1 }: MockOptions = {}) {

@@ -165,6 +165,7 @@ describe('the model prompt for a handoff recap', () => {
     const seen: ChatMessage[][] = []
     const llm: LLM = {
       model: 'fake-model',
+      offline: false,
       async complete(messages): Promise<Completion> {
         seen.push(messages)
         return { text: reply, toolCalls: [], finishReason: 'stop', model: 'fake-model', inputTokens: 21, outputTokens: 9 }
@@ -198,6 +199,7 @@ describe('the model prompt for a handoff recap', () => {
     const seen: ChatMessage[][] = []
     const llm: LLM = {
       model: 'fake-model',
+      offline: false,
       async complete(messages, options) {
         seen.push(messages)
         const wantsPerson = !options?.tools?.length ? undefined : { id: 'h1', name: 'handoff_to_human', arguments: { reason: 'wants a person' } }
@@ -407,6 +409,7 @@ describe('a handed-off session', () => {
     const inner = new MockLLM({ tokenDelayMs: 0 })
     const spy = {
       model: inner.model,
+      offline: inner.offline,
       complete: (...args: Parameters<typeof inner.complete>) => {
         calls.push(1)
         return inner.complete(...args)

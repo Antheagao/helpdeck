@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["server", "tests"]
+  "include": ["server", "tests", "evals"]
 }

@@ -73,6 +73,7 @@ export async function proposeTicket(app: Harness, sessionId: string, message = '
 /** A model that returns the given turns in order, recording what it was sent. */
 export class ScriptedLLM implements LLM {
   readonly model = 'scripted'
+  readonly offline = false
   readonly seen: ChatMessage[][] = []
   private step = 0
 

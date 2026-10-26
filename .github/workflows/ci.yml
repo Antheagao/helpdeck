@@ -31,3 +31,49 @@ jobs:
       - name: Build widget
         run: npm run widget:build
         if: hashFiles('widget/vite.config.ts') != ''
+
+  # The offline eval gate: its own job, so a regression shows up as a red
+  # "evals" check naming the metric, not as a buried assertion in the tests.
+  evals:
+    runs-on: ubuntu-24.04
+    env:
+      # The evals never call a provider; the harness also refuses to start if a key is set.
+      MODEL_PROVIDER: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Eval gate
+        run: npm run eval:check
+      # Thresholds are pinned to measured values; lowering one has to say why.
+      - name: Thresholds are not loosened
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            # The checkout is a merge commit: its first parent is the base, the second the PR head.
+            BASE=HEAD^1
+            HEAD_COMMIT=HEAD^2
+          else
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "no earlier commit to compare against"
+              exit 0
+            fi
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+            BASE="$BEFORE"
+            HEAD_COMMIT=HEAD
+          fi
+          if ! git show "$BASE:evals/thresholds.json" > "$RUNNER_TEMP/thresholds.base.json"; then
+            echo "no thresholds in the base commit"
+            exit 0
+          fi
+          git log -1 --format=%B "$HEAD_COMMIT" > "$RUNNER_TEMP/commit-message.txt"
+          npx tsx evals/thresholds-guard.ts "$RUNNER_TEMP/thresholds.base.json" "$RUNNER_TEMP/commit-message.txt"

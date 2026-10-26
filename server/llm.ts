@@ -53,6 +53,14 @@ export interface CompleteOptions {
 
 export interface LLM {
   readonly model: string
+  /**
+   * True for a model that needs no provider and cannot write prose: the
+   * offline mock, and any stand-in built on it. Summaries (the rolling memory
+   * summary, a handoff recap) then take the deterministic extractive path
+   * instead of asking the model. A wrapper must forward this from the model it
+   * wraps, or it will be asked for prose it cannot write.
+   */
+  readonly offline: boolean
   complete(messages: ChatMessage[], options?: CompleteOptions): Promise<Completion>
 }
 
@@ -194,6 +202,7 @@ export interface AnthropicOptions {
 }
 
 export class AnthropicLLM implements LLM {
+  readonly offline = false
   readonly model: string
   private readonly maxTokens: number
   private readonly fetchFn: typeof fetch
@@ -352,6 +361,7 @@ export interface OpenAIOptions {
 }
 
 export class OpenAILLM implements LLM {
+  readonly offline = false
   readonly model: string
   private readonly fetchFn: typeof fetch
 
