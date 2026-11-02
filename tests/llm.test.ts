@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -733,4 +733,29 @@ describe('server startup', () => {
     expect(result.stderr).toContain('MODEL_PROVIDER=mock refuses to start while ANTHROPIC_API_KEY is set')
     expect(result.stderr).not.toContain('dummy-not-a-real-key')
   })
+
+  // Node's default would listen on every interface; the server must not unless asked.
+  it('listens on loopback by default', async () => {
+    const child = spawn(process.execPath, ['--import', 'tsx', path.join(ROOT, 'server', 'index.ts')], {
+      cwd: ROOT,
+      env: { PATH: process.env.PATH, MODEL_PROVIDER: 'mock', PORT: '0' },
+    })
+    try {
+      const line = await new Promise<string>((resolve, reject) => {
+        let out = ''
+        const timer = setTimeout(() => reject(new Error(`no startup line: ${out}`)), 30_000)
+        child.stdout.on('data', (chunk: Buffer) => {
+          out += chunk.toString()
+          const match = /helpdeck on (\S+)/.exec(out)
+          if (match) {
+            clearTimeout(timer)
+            resolve(match[1] ?? '')
+          }
+        })
+      })
+      expect(line.startsWith('http://127.0.0.1:')).toBe(true)
+    } finally {
+      child.kill()
+    }
+  }, 35_000)
 })

@@ -5,6 +5,7 @@
  *
  * Environment:
  *   PORT               listen port (default 4319)
+ *   HOST               listen address (default 127.0.0.1; 0.0.0.0 for every interface)
  *   MODEL_PROVIDER     anthropic | openai | mock; unset picks by key (below)
  *   ANTHROPIC_API_KEY  use Claude (else OPENAI_API_KEY, else the offline mock)
  *   HELPDECK_MODEL     override the model id
@@ -316,9 +317,13 @@ if (isMain) {
     operatorToken,
   })
   const port = Number(process.env.PORT || 4319)
-  createApp(deps).listen(port, () => {
+  // Loopback unless the deployment says otherwise: Node's default would
+  // listen on every interface, putting the demo and the operator API on
+  // whatever network the machine is joined to.
+  const host = process.env.HOST || '127.0.0.1'
+  createApp(deps).listen(port, host, () => {
     console.log(
-      `helpdeck on http://127.0.0.1:${port} ` +
+      `helpdeck on http://${host.includes(':') ? `[${host}]` : host}:${port} ` +
         `(provider: ${provider}, model: ${deps.llm.model}, passages: ${deps.index.passages.length}, ` +
         `tools: ${enabledTools.join(',') || 'none'}, ` +
         `operator api: ${operatorToken ? 'on' : 'off'}, ` +

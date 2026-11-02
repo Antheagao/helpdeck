@@ -49,6 +49,7 @@ HELPDECK_MODEL=claude-haiku-4-5
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `4319` | Listen port |
+| `HOST` | `127.0.0.1` | Listen address; set `0.0.0.0` only behind a proxy or firewall you trust |
 | `MODEL_PROVIDER` | unset | `anthropic`, `openai`, or `mock`. Unset picks by key (Anthropic, then OpenAI, then the mock). An explicit value needs its key, and `mock` refuses to start beside a key or `HELPDECK_MODEL`, so a demo can never spend |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | unset | Provider; unset means the offline mock |
 | `HELPDECK_MODEL` | per provider | Override the model id |
